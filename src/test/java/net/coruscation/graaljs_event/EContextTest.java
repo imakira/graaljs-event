@@ -1,20 +1,20 @@
 package net.coruscation.graaljs_event;
 
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.net.URISyntaxException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Source;
 import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.*;
 
 public class EContextTest {
 
@@ -42,7 +42,8 @@ public class EContextTest {
         var ec = new EContext(Context.newBuilder("js").allowIO(true));
         var testFileURL = this.getClass().getClassLoader().getResource("current_dir_test.js");
         var result = ec.eval(Source.newBuilder("js", testFileURL).build());
-        assertEquals(Paths.get(testFileURL.toURI()).getParent().toString(), Path.of(result.asString()).getParent().toString());
+        assertEquals(Paths.get(testFileURL.toURI()).getParent().toString(),
+                Path.of(result.asString()).getParent().toString());
     }
 
     @Test
@@ -72,9 +73,56 @@ public class EContextTest {
                 .mimeType("application/javascript+module")
                 .build());
         TimeUnit.MILLISECONDS.sleep(1000);
-        assertEquals(20001,ec.eval(() -> {
+        assertEquals(20001, ec.eval(() -> {
             return ec.getJsContext().getBindings("js").getMember("count").asInt();
         }));
         System.out.println("");
+    }
+
+    @Test
+    public void webworkerIllegalStateCheckTest() throws ExecutionException, InterruptedException {
+        var ec = new EContext(Context.newBuilder("js"));
+        try {
+            ec.evalAsync(() -> {
+                ec.eval(() -> {
+                    System.out.println("error");
+                });
+            }).get();
+        } catch (Throwable t) {
+            assertInstanceOf(ExecutionException.class, t);
+            assertInstanceOf(IllegalThreadStateException.class, t.getCause());
+        }
+    }
+
+    @Test
+    public void webworkerIllegalStateCheckTest2() throws ExecutionException, InterruptedException {
+        var ec = new EContext(Context.newBuilder("js"));
+        try {
+            ec.eval(() -> {
+                ec.eval(() -> {
+                    System.out.println("error");
+                });
+            });
+        } catch (Throwable t) {
+            assertInstanceOf(RuntimeException.class, t);
+            assertInstanceOf(ExecutionException.class, t.getCause());
+            assertInstanceOf(IllegalThreadStateException.class, t.getCause().getCause());
+        }
+    }
+
+    @Test
+    public void webworkerIllegalStateCheckTest3() throws ExecutionException, InterruptedException {
+        var ec = new EContext(Context.newBuilder("js"));
+        assertThrows(IllegalThreadStateException.class, () -> {
+            ec.getEventLoop().getJsContext();
+        });
+    }
+
+    @Test
+    public void jsContextIllegalStateTest() throws InterruptedException {
+        var ec = new EContext(Context.newBuilder("js"));
+        assertThrows(IllegalStateException.class, ()-> {
+            ec.eval("({a:\"b\"})").getMember("a");
+        });
     }
 }

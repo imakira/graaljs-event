@@ -142,18 +142,10 @@ class JsNewWorkerContext extends SimpleJsFunc {
         Value options = arguments.length == 3 ? arguments[2] : null;
         var isEsmModule = options != null && options.hasMember("type")
                 && options.getMember("type").asString().equals("module");
-        Path p = null;
-
 
         try {
-
-            if (urlOrPath.startsWith("file:/")) {
-                p = Paths.get(new URI(urlOrPath)).toAbsolutePath().normalize();
-            } else {
-                p = Path.of(urlOrPath).normalize();
-            }
-
-
+            Path p = urlOrPath.startsWith("file:/") ? Paths.get(new URI(urlOrPath)).toAbsolutePath().normalize()
+                    : Path.of(urlOrPath).normalize();
             if (!p.toFile().exists() || p.toFile().isDirectory()) {
                 throw new RuntimeException("Js file does not exist: '" + p.toString() + "'");
             }
@@ -181,6 +173,7 @@ class JsNewWorkerContext extends SimpleJsFunc {
             var workerSource = workerSourceBuilder.build();
 
             workerEContext.evalAsync(() -> {
+                Thread.currentThread().setName("JS Worker Thread " + p.getFileName());
                 Context workerJsContext = workerEContext.getJsContext();
                 workerJsContext.eval("js", "globalThis.self=globalThis");
                 workerJsContext.getBindings("js").getMember("_setup_worker").execute();
@@ -212,11 +205,6 @@ class jsSendMessage extends SimpleJsFunc {
     }
 
     @Override
-    /*
-     * 1. target Context
-     * 2. callback ref
-     * 3. data
-     */
     public Object execute(Value... arguments) {
         if (arguments.length != 3 || !arguments[0].isHostObject() || !arguments[1].isHostObject()) {
             throw new IllegalArgumentException();
@@ -279,31 +267,48 @@ public class EContext {
     class EventLoop {
         private final ScheduledExecutorService executor;
         private final Context jsContext;
+        private final Thread thread;
 
         final ThreadLocal<Map<Object, Consumer<Object>>> handlers = ThreadLocal.withInitial(() -> new HashMap<>());
 
-
-        public EventLoop(Context jsContext, ScheduledExecutorService executor) {
+        public EventLoop(Context jsContext, ScheduledExecutorService executor) throws InterruptedException, ExecutionException {
             this.jsContext = jsContext;
             this.executor = executor;
+
+            // explicit binding Context to this thread
+            jsContext.enter();
+
+            this.thread = Thread.currentThread();
         }
 
         public ScheduledExecutorService getExecutor() {
             return executor;
         }
 
+        public long threadId() {
+            return this.thread.threadId();
+        }
+
         public Context getJsContext() {
+            if (!Thread.currentThread().equals(this.thread)) {
+                throw new IllegalThreadStateException();
+            }
             return jsContext;
         }
 
         void putMessageHandler(Object key, Consumer<Object> handler) {
+            if (!Thread.currentThread().equals(this.thread)) {
+                throw new IllegalThreadStateException();
+            }
             this.handlers.get().put(key, handler);
         }
 
         public ThreadLocal<Map<Object, Consumer<Object>>> getHandlers() {
+            if (!Thread.currentThread().equals(this.thread)) {
+                throw new IllegalThreadStateException();
+            }
             return handlers;
         }
-
     }
 
     static void initializeJsContext(Context jsContext, EContext eventContext) {
@@ -323,14 +328,27 @@ public class EContext {
     }
 
     public EContext(Context.Builder contextBuilder) {
-        this.eventLoop = new EventLoop(contextBuilder.build(), Executors.newSingleThreadScheduledExecutor());
-        this.contextBuilder = contextBuilder;
-        this.eval(() -> {
-            initializeJsContext(this.getJsContext(), this);
-        });
+        try {
+            var executor = Executors.newSingleThreadScheduledExecutor();
+            var eventLoop = executor.submit(() -> {
+                var jsContext = contextBuilder.build();
+                Thread.currentThread().setName("JS Main");
+                return new EventLoop(jsContext, executor);
+            }).get();
+            this.eventLoop = eventLoop;
+            this.contextBuilder = contextBuilder;
+            this.eval(()-> {
+                initializeJsContext(this.getJsContext(), this);
+            });
+        } catch (InterruptedException | ExecutionException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     public <T> T eval(Supplier<T> f) {
+        if (Thread.currentThread().threadId() == this.eventLoop.threadId()) {
+            throw new IllegalThreadStateException();
+        }
         try {
             return this.eventLoop.getExecutor().submit(() -> {
                 return f.get();
@@ -341,6 +359,9 @@ public class EContext {
     }
 
     public void eval(Runnable f) {
+        if (Thread.currentThread().threadId() == this.eventLoop.threadId()) {
+            throw new IllegalThreadStateException();
+        }
         try {
             this.eventLoop.getExecutor().submit(f).get();
         } catch (InterruptedException | ExecutionException e) {
@@ -349,17 +370,22 @@ public class EContext {
     }
 
     public Value eval(String source) {
+        if (Thread.currentThread().threadId() == this.eventLoop.threadId()) {
+            throw new IllegalThreadStateException();
+        }
         return this.eval(() -> {
             return this.getJsContext().eval("js", source);
         });
     }
 
     public Value eval(Source source) {
+        if (Thread.currentThread().threadId() == this.eventLoop.threadId()) {
+            throw new IllegalThreadStateException();
+        }
         return this.eval(() -> {
             return this.getJsContext().eval(source);
         });
     }
-
 
     public void sendMessage(Object key, Object data) {
         this.evalAsync(() -> {
@@ -370,8 +396,8 @@ public class EContext {
         });
     }
 
-    void evalAsync(Runnable f) {
-        this.eventLoop.getExecutor().submit(f);
+    Future<?> evalAsync(Runnable f) {
+        return this.eventLoop.getExecutor().submit(f);
     }
 
     <T> Future<T> evalAsync(Supplier<T> f) {
@@ -395,5 +421,4 @@ public class EContext {
     public EventLoop getEventLoop() {
         return eventLoop;
     }
-
 }
