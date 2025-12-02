@@ -1,4 +1,6 @@
 
 self.onmessage = (e => {
-    postMessage('hiya!');
+    if(e.data == 'hello'){
+      postMessage('hiya!');
+    }
 })

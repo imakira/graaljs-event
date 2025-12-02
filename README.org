@@ -1,0 +1,84 @@
+Proof of Concept implementations of setTimeout / Webworker API for GraalJS
+
+** Demonstration
+
+*** ~setTimeout~
+
+We can use setTimeout just like we do in Javascript
+
+#+BEGIN_SRC java
+    @Test
+    void setTimeoutExample() throws InterruptedException {
+        var out = new ByteArrayOutputStream();
+        var ec = new EContext(Context.newBuilder("js").out(out));
+        ec.eval("setTimeout(()=>{console.log('bonjour!')}, 1000)");
+        assertEquals("", out.toString());
+        TimeUnit.MILLISECONDS.sleep(1500);
+        assertEquals("bonjour!\n", out.toString());
+    }
+#+END_SRC
+
+Cancel timer is also supported
+
+#+BEGIN_SRC java
+@Test
+void setTimeoutCancel() throws InterruptedException {
+    var out = new ByteArrayOutputStream();
+    var ec = new EContext(Context.newBuilder("js").out(out));
+    ec.eval("timer = setTimeout(()=>{console.log('bonjour!')}, 1000)");
+    ec.eval("clearTimeout(timer)");
+    TimeUnit.MILLISECONDS.sleep(1500);
+    assertEquals("", out.toString());
+}
+#+END_SRC
+
+
+
+*** Webworker
+
+Java code for loading javascript file and validating result:
+
+#+BEGIN_SRC java
+  @Test
+  void webworkerTest() throws InterruptedException, IOException {
+      ByteArrayOutputStream out = new ByteArrayOutputStream();
+      var ec = new EContext(Context.newBuilder("js")
+              .allowIO(true)
+              .out(out));
+      System.setOut(new PrintStream(out));
+      ec.eval(Source.newBuilder("js", this.getClass()
+              .getClassLoader()
+              .getResource("main.js"))
+              .mimeType("application/javascript+module")
+              .build());
+      TimeUnit.MILLISECONDS.sleep(50);
+      assertEquals("hiya!\n", out.toString());
+  }
+#+END_SRC
+
+Content of main.js
+
+#+BEGIN_SRC javascript
+  // There is no `URL` class support in graaljs.
+  // We use this weird syntax to get the current directory
+  //     and append our worker script's filename.
+  const worker = new Worker(import.meta.url + '/../worker.js');
+
+  worker.onmessage = (e => {
+      console.log(e.data)  // "hiya!"
+  });
+
+  worker.postMessage('hello');
+#+END_SRC
+
+Content of worker.js
+
+#+BEGIN_SRC javascript
+self.onmessage = (e => {
+    if(e.data == 'hello'){
+      postMessage('hiya!');
+    }
+})
+#+END_SRC
+
+You can see more usages in the [[https://github.com/imakira/graaljs-event/blob/master/src/test/java/net/coruscation/graaljs_event/EContextTest.java][EContextTest.java]] file.
